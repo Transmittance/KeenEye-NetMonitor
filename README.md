@@ -1,2 +1,5 @@
-# KeenEye NetMonitor
-Smart traffic analysis system for Keenetic that uses machine learning to classify network traffic, detect anomalies, and block suspicious activities.
+![alt text](https://raw.githubusercontent.com/Transmittance/KeenEye-NetMonitor/refs/heads/main/logo/main-1.png)
+
+<hr>
+
+KeenEye NetMonitor – smart traffic analysis system for Keenetic that uses machine learning to classify network traffic, detect anomalies, and block suspicious activities.
