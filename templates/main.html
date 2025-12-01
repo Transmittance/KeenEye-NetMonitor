@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+
+{% block content %}
+    <a>f</a>
+    {% for p in pcaps %}
+    <a href="/pcap/{{ p.name }}">{{ p.name }}</a><br>
+{% endfor %}
+{% endblock %}

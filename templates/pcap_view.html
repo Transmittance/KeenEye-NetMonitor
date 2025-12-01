@@ -1,0 +1,28 @@
+<h2>pcap: {{ name }}</h2>
+
+<table border="1" cellpadding="5">
+  <tr>
+    <th>#</th><th>time</th><th>src</th><th>dst</th>
+    <th>sport</th><th>dport</th><th>proto</th><th>len</th>
+    <th>dns</th>
+  </tr>
+  {% for p in packets %}
+  <tr>
+    <td>{{ loop.index }}</td>
+    <td>{{ "%.3f"|format(p.time) }}</td>
+    <td>{{ p.src }}</td>
+    <td>{{ p.dst }}</td>
+    <td>{{ p.sport }}</td>
+    <td>{{ p.dport }}</td>
+    <td>{{ p.proto }}</td>
+    <td>{{ p.len }}</td>
+    <td>
+      {% if p.dns %}
+        {{ p.dns }}
+      {% else %}
+        -
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
