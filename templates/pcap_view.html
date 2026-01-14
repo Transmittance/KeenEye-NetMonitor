@@ -1,28 +1,51 @@
-<h2>pcap: {{ name }}</h2>
+<!doctype html>
+<html>
+<head>
+    <title>{{ name }}</title>
+    <style>
+        table { border-collapse: collapse; font-family: monospace; }
+        th, td { border: 1px solid #ccc; padding: 4px 6px; }
+        th { background: #eee; }
+    </style>
+</head>
+<body>
 
-<table border="1" cellpadding="5">
-  <tr>
-    <th>#</th><th>time</th><th>src</th><th>dst</th>
-    <th>sport</th><th>dport</th><th>proto</th><th>len</th>
-    <th>dns</th>
-  </tr>
-  {% for p in packets %}
-  <tr>
-    <td>{{ loop.index }}</td>
-    <td>{{ "%.3f"|format(p.time) }}</td>
-    <td>{{ p.src }}</td>
-    <td>{{ p.dst }}</td>
-    <td>{{ p.sport }}</td>
-    <td>{{ p.dport }}</td>
-    <td>{{ p.proto }}</td>
-    <td>{{ p.len }}</td>
-    <td>
-      {% if p.dns %}
-        {{ p.dns }}
-      {% else %}
-        -
-      {% endif %}
-    </td>
-  </tr>
-  {% endfor %}
+<h2>Flows: {{ name }}</h2>
+<p>Total flows: {{ flows|length }}</p>
+
+<table>
+    <tr>
+        <th>src</th>
+        <th>dst</th>
+        <th>sport</th>
+        <th>dport</th>
+        <th>proto</th>
+        <th>packets</th>
+        <th>bytes</th>
+        <th>duration</th>
+        <th>pps</th>
+        <th>bps</th>
+        <th>ext_ip</th>
+        <th>domain</th>
+    </tr>
+
+    {% for f in flows %}
+    <tr>
+        <td>{{ f.src }}</td>
+        <td>{{ f.dst }}</td>
+        <td>{{ f.sport }}</td>
+        <td>{{ f.dport }}</td>
+        <td>{{ f.proto }}</td>
+        <td>{{ f.packets }}</td>
+        <td>{{ f.bytes }}</td>
+        <td>{{ "%.3f"|format(f.duration) }}</td>
+        <td>{{ "%.2f"|format(f.pps) }}</td>
+        <td>{{ "%.1f"|format(f.bps) }}</td>
+        <td>{{ f.ext_ip or "" }}</td>
+        <td>{{ f.domain or "" }}</td>
+    </tr>
+    {% endfor %}
 </table>
+
+</body>
+</html>
