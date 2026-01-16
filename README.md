@@ -5,7 +5,7 @@
 ***KeenEye NetMonitor*** – smart traffic analysis system for Keenetic that uses machine learning to classify network traffic, detect anomalies, and block suspicious activities.
 
 ### Requirements
-`curl` and `tcpdump` are required. Run:
+`ndmq`, `curl` and `tcpdump` are required. Run:
 ```sh
-opkg update && opkg install curl && opkg install tcpdump
+opkg update && opkg install curl && opkg install tcpdump && opkg install ndmq
 ```
