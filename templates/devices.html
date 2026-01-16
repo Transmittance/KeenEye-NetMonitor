@@ -1,0 +1,79 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Devices</title>
+  <style>
+    body { font-family: monospace; }
+    table { border-collapse: collapse; margin-top: 10px; }
+    td, th { border: 1px solid #ccc; padding: 6px 8px; }
+    .on { font-weight: bold; }
+  </style>
+</head>
+<body>
+  <button id="refresh">Refresh</button>
+  <label><input type="checkbox" id="auto" checked> Auto</label>
+  <div id="status">idle</div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Online</th>
+        <th>IP</th>
+        <th>MAC</th>
+        <th>Name</th>
+        <th>Hostname</th>
+        <th>Vendor</th>
+        <th>Type</th>
+        <th>Expires</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+<script>
+const tbody = document.getElementById("tbody");
+const statusEl = document.getElementById("status");
+const auto = document.getElementById("auto");
+document.getElementById("refresh").onclick = load;
+
+function esc(s){
+  return (s ?? "").toString()
+    .replaceAll("&","&amp;").replaceAll("<","&lt;")
+    .replaceAll(">","&gt;").replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
+}
+
+function render(devices){
+  tbody.innerHTML = devices.map(d => `
+    <tr class="${d.online ? "on" : ""}">
+      <td>${d.online ? "yes" : ""}</td>
+      <td>${esc(d.online ? d.ip : "")}</td>
+      <td>${esc(d.mac)}</td>
+      <td>${esc(d.name || "")}</td>
+      <td>${esc(d.hostname || "")}</td>
+      <td>${esc(d.vendor || "")}</td>
+      <td>${esc(d.type || "")}</td>
+      <td>${d.expires ?? ""}</td>
+    </tr>
+  `).join("");
+}
+
+async function load(){
+  statusEl.textContent = "loading...";
+  try{
+    const r = await fetch("/api/devices");
+    const data = await r.json();
+    if(!data.ok){ statusEl.textContent = "error"; return; }
+    render(data.devices || []);
+    statusEl.textContent = `ok: ${(data.devices||[]).length} devices`;
+  }catch(e){
+    statusEl.textContent = "error: " + e;
+  }
+}
+
+load();
+setInterval(() => { if (auto.checked) load(); }, 5000);
+</script>
+</body>
+</html>
