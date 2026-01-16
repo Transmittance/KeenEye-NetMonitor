@@ -1,5 +1,5 @@
 from flask import Response, Flask, render_template, session, request, jsonify
-import os, time, pyshark, uuid, threading, json
+import os, re, time, pyshark, uuid, threading, json
 from dataclasses import dataclass, asdict
 import ipaddress
 import paramiko
@@ -253,7 +253,235 @@ def _run_capture_job(job_id, limit_packets):
         except Exception:
             pass
 
-#3 ––––––––––- flask routes ––––––––––-
+#3 ––––––––––- identify devices connected to the network ––––––––––-
+
+def _ssh_exec(cmd):
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(
+        ROUTER_HOST,
+        port=222,
+        username=ROUTER_USER,
+        key_filename=ROUTER_KEY,
+        timeout=10,
+        banner_timeout=10,
+        auth_timeout=10,
+    )
+    try:
+        stdin, stdout, stderr = ssh.exec_command(cmd)
+        out = stdout.read().decode("utf-8", "ignore")
+        err = stderr.read().decode("utf-8", "ignore")
+        return out if out.strip() else err
+    finally:
+        ssh.close()
+
+def _parse_ndmc_kv_blocks(text):
+    blocks = []
+    cur = None
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+
+        if line.startswith("lease:"):
+            if cur:
+                blocks.append(cur)
+            cur = {}
+            continue
+
+        if cur is None:
+            continue
+
+        m = re.match(r"^([a-zA-Z0-9_]+):\s*(.*)$", line)
+        if not m:
+            continue
+
+        k = m.group(1).strip()
+        v = m.group(2).strip()
+        cur[k] = v if v != "" else None
+
+    if cur:
+        blocks.append(cur)
+
+    return blocks
+
+def _read_dhcp_bindings():
+    raw = _ssh_exec('ndmc -c "show ip dhcp bindings"')
+    leases = _parse_ndmc_kv_blocks(raw)
+
+    out = {}
+    for l in leases:
+        ip = l.get("ip")
+        mac = (l.get("mac") or "").lower()
+        if not mac:
+            continue
+
+        expires = l.get("expires")
+        out[mac] = {
+            "dhcp_ip": ip,
+            "hostname": l.get("hostname"),
+            "dhcp_name": l.get("name"),
+            "expires": int(expires) if (expires and str(expires).isdigit()) else None,
+            "via": l.get("via"),
+        }
+
+    return out
+
+def _read_hotspot_table():
+    raw = _ssh_exec('ndmq -x -p "show ip hotspot"')
+    lines = raw.splitlines()
+
+    cur_mac = None
+    cur_ip = None
+    cur_name = None
+
+    out = {}
+
+    def commit():
+        nonlocal cur_mac, cur_ip, cur_name
+        if not cur_mac:
+            return
+        mac = cur_mac.lower()
+        ip = (cur_ip or "").strip()
+        name = (cur_name or "").strip() or None
+
+        online = bool(ip and ip != "0.0.0.0")
+
+        out[mac] = {
+            "mac": mac,
+            "ip": ip if ip else None,
+            "name": name,
+            "online": online,
+        }
+
+        cur_mac = None
+        cur_ip = None
+        cur_name = None
+
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        m = re.search(r"<mac>([^<]+)</mac>", line, re.I)
+        if m:
+            commit()
+            cur_mac = m.group(1).strip()
+            continue
+
+        m = re.search(r"<ip>([^<]+)</ip>", line, re.I)
+        if m and cur_mac:
+            cur_ip = m.group(1).strip()
+            continue
+
+        m = re.search(r"<name>([^<]+)</name>", line, re.I)
+        if m and cur_mac:
+            if cur_name is None:
+                cur_name = m.group(1).strip()
+            continue
+
+    commit()
+    return out
+
+# vvv PLACEHOLDERS, WILL BE CHANGED LATER vvv
+_OUI_VENDOR = {
+    "f0:2f:74": "Apple",
+    "3c:22:fb": "Apple",
+    "d8:3a:dd": "Samsung",
+    "50:ff:20": "Keenetic",
+}
+
+def _vendor_from_mac(mac):
+    mac = (mac or "").lower()
+    prefix = ":".join(mac.split(":")[:3])
+    return _OUI_VENDOR.get(prefix)
+
+def _guess_device_type(vendor, hostname):
+    v = (vendor or "").lower()
+    h = (hostname or "").lower()
+
+    if any(x in h for x in ["iphone", "ipad", "ios"]) or "apple" in v:
+        return "Phone/Tablet (likely)"
+    if any(x in h for x in ["macbook", "imac", "windows", "pc", "laptop", "desktop"]):
+        return "PC/Laptop (likely)"
+    if any(x in h for x in ["tv", "bravia", "tizen", "webos", "chromecast", "shield"]):
+        return "TV/Media (likely)"
+    if any(x in h for x in ["cam", "camera", "ipcam", "door", "vacuum", "iot", "tuya"]):
+        return "IoT (likely)"
+    if "keenetic" in v:
+        return "Router/Network"
+    if vendor:
+        return "Unknown (vendor-based)"
+    return "Unknown"
+
+# ^^^ PLACEHOLDERS, WILL BE CHANGED LATER ^^^
+
+def _get_devices_snapshot():
+    hotspot = _read_hotspot_table()      # mac -> {mac, ip, name, online}
+    dhcp = _read_dhcp_bindings()         # mac -> {dhcp_ip, hostname, dhcp_name, expires, via}
+
+    by_mac = {}
+
+    for mac, h in hotspot.items():
+        d = dhcp.get(mac, {})
+        vendor = _vendor_from_mac(mac) 
+
+        display_name = (
+            d.get("dhcp_name")
+            or h.get("name")
+            or d.get("hostname")
+            or None
+        )
+
+        dtype = _guess_device_type(vendor, display_name or d.get("hostname") or "")
+
+        ip = h.get("ip")
+        if not ip or ip == "0.0.0.0":
+            ip = d.get("dhcp_ip")
+
+        by_mac[mac] = {
+            "mac": mac,
+            "ip": ip,
+            "name": display_name,
+            "hostname": d.get("hostname"),
+            "expires": d.get("expires"),
+            "online": bool(h.get("online")),
+            "vendor": vendor,
+            "type": dtype,
+            "registered": mac in dhcp,
+        }
+
+    for mac, d in dhcp.items():
+        if mac in by_mac:
+            continue
+
+        vendor = _vendor_from_mac(mac)
+        display_name = d.get("dhcp_name") or d.get("hostname") or None
+        dtype = _guess_device_type(vendor, display_name or "")
+
+        by_mac[mac] = {
+            "mac": mac,
+            "ip": d.get("dhcp_ip"),
+            "name": display_name,
+            "hostname": d.get("hostname"),
+            "expires": d.get("expires"),
+            "online": False,
+            "vendor": vendor,
+            "type": dtype,
+            "registered": True,
+        }
+
+    devices = list(by_mac.values())
+
+    devices.sort(key=lambda x: (
+        x["online"] is False,
+        x["registered"] is False,
+        x.get("ip") or "",
+        x["mac"],
+    ))
+
+    return devices
+
+#4 ––––––––––- flask routes ––––––––––-
 
 @app.post("/capture/start")
 def capture_start():
@@ -354,6 +582,14 @@ def upload_pcap():
 @app.get("/capture")
 def capture_page():
     return render_template("capture.html")
+
+@app.get("/devices")
+def devices_page():
+    return render_template("devices.html")
+
+@app.get("/api/devices")
+def devices_api():
+    return jsonify({"ok": True, "devices": _get_devices_snapshot()})
 
 if __name__ == '__main__':
     app.run(host="192.168.1.130", port=5001)
