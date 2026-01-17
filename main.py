@@ -1,5 +1,5 @@
 from flask import Response, Flask, render_template, session, request, jsonify
-import os, re, time, pyshark, uuid, threading, json
+import os, re, time, pyshark, uuid, threading, json, csv
 from dataclasses import dataclass, asdict
 import ipaddress
 import paramiko
@@ -382,38 +382,94 @@ def _read_hotspot_table():
     commit()
     return out
 
-# vvv PLACEHOLDERS, WILL BE CHANGED LATER vvv
-_OUI_VENDOR = {
-    "f0:2f:74": "Apple",
-    "3c:22:fb": "Apple",
-    "d8:3a:dd": "Samsung",
-    "50:ff:20": "Keenetic",
-}
+def _mac12(mac):
+    s = re.sub(r"[^0-9a-fA-F]", "", mac or "").lower()
+    return s if re.compile(r"^[0-9a-f]{12}$").match(s) else None
+
+def _load(path):
+    with open(path, encoding="utf-8", newline="") as f:
+        r = csv.DictReader(f)
+        return {row["Assignment"].lower(): row["Organization Name"].strip() for row in r}
+
+DB = {**_load("vendors/ma-s.csv"), **_load("vendors/ma-m.csv"), **_load("vendors/ma-l.csv")}
+
+def _is_randomized_mac(mac):
+    s = re.sub(r"[^0-9a-fA-F]", "", mac or "")
+    return len(s) == 12 and (int(s[:2], 16) & 2) != 0
 
 def _vendor_from_mac(mac):
-    mac = (mac or "").lower()
-    prefix = ":".join(mac.split(":")[:3])
-    return _OUI_VENDOR.get(prefix)
+    m = _mac12(mac)
+    if not m: return None
+    if not m: "Bad MAC"
 
-def _guess_device_type(vendor, hostname):
+    if _is_randomized_mac(mac):
+        return "[Randomized MAC]"
+    return DB.get(m[:9]) or DB.get(m[:7]) or DB.get(m[:6])
+
+def _guess_device_type(mac, vendor, hostname):
     v = (vendor or "").lower()
     h = (hostname or "").lower()
 
-    if any(x in h for x in ["iphone", "ipad", "ios"]) or "apple" in v:
-        return "Phone/Tablet (likely)"
-    if any(x in h for x in ["macbook", "imac", "windows", "pc", "laptop", "desktop"]):
-        return "PC/Laptop (likely)"
-    if any(x in h for x in ["tv", "bravia", "tizen", "webos", "chromecast", "shield"]):
-        return "TV/Media (likely)"
-    if any(x in h for x in ["cam", "camera", "ipcam", "door", "vacuum", "iot", "tuya"]):
-        return "IoT (likely)"
-    if "keenetic" in v:
-        return "Router/Network"
-    if vendor:
-        return "Unknown (vendor-based)"
-    return "Unknown"
+    # Phones or tablets
+    phone_h = (
+        "iphone","ipad","ios","android","samsung","galaxy","pixel","huawei","honor",
+        "xiaomi","redmi","mi","oppo","vivo","oneplus","realme","motorola","moto","nokia","phone",
+    )
+    if any(x in h for x in phone_h) or any(x in v for x in ("apple","samsung","xiaomi","huawei","honor","oppo","vivo","oneplus","google")):
+        return "Phone/Tablet"
 
-# ^^^ PLACEHOLDERS, WILL BE CHANGED LATER ^^^
+    # PCs or laptops
+    pc_h = ("macbook","imac","macmini","windows","win","pc","laptop","notebook","desktop","thinkpad","latitude","xps","spectre","envy","ideapad","legion","zenbook","vivobook")
+    pc_v = ("intel","amd","dell","lenovo","hp","hewlett packard","asus","acer","msi","micro-star","fujitsu","toshiba","sony","lg electronics")
+    if any(x in h for x in pc_h) or any(x in v for x in pc_v):
+        return "PC/Laptop"
+
+    # Router etc
+    net_h = ("router","gateway","ap","access point","switch","bridge","keenetic","mikrotik","ubiquiti","unifi","edge","openwrt")
+    net_v = ("keenetic","zyxel","mikrotik","ubiquiti","tp-link","netgear","d-link","cisco","aruba","juniper","huawei technologies")
+    if any(x in h for x in net_h) or any(x in v for x in net_v):
+        return "Router/Network"
+
+    # TV etc
+    tv_h = ("tv","androidtv","smarttv","bravia","tizen","webos","chromecast","shield","firetv","roku","appletv","mi box","settop","stb")
+    tv_v = ("sony","samsung","lg","roku","google","amazon","nvidia","sonos","bose","yamaha","denon","pioneer")
+    if any(x in h for x in tv_h) or any(x in v for x in tv_v):
+        return "TV/Media"
+
+    # Printers etc
+    pr_h = ("printer","print","mfp","laserjet","deskjet","officejet","envy","epson","canon","brother","xerox","ricoh","kyocera")
+    pr_v = ("hp","hewlett packard","epson","canon","brother","xerox","ricoh","kyocera","konica minolta","lexmark")
+    if any(x in h for x in pr_h) or any(x in v for x in pr_v):
+        return "Printer/Scanner"
+
+    # Cameras etc
+    cam_h = ("cam","camera","ipcam","door","doorbell","nvr","dvr","hik","dahua","reolink","ezviz","uniview","wyze","arlo","ring")
+    cam_v = ("hikvision","dahua","reolink","ezviz","uniview","axis","ring","arlo","wyze","ubiquiti")
+    if any(x in h for x in cam_h) or any(x in v for x in cam_v):
+        return "Camera/Security"
+
+    # IoT
+    iot_h = ("iot","tuya","smart","plug","bulb","light","lamp","switch","socket","thermostat","sensor","gateway","zigbee","z-wave","matter","homekit","alexa","googlehome")
+    iot_v = ("tuya","aqara","xiaomi","yeelight","philips","signify","ikea","shelly","sonoff","espressif","broadlink","tplink","amazon","google")
+    if any(x in h for x in iot_h) or any(x in v for x in iot_v):
+        return "IoT/SmartHome"
+
+    # Gaming consoles
+    game_h = ("playstation","ps4","ps5","xbox","nintendo","switch")
+    game_v = ("sony","microsoft","nintendo")
+    if any(x in h for x in game_h) or any(x in v for x in game_v):
+        return "Game Console"
+
+    # Servers etc
+    nas_h = ("nas","synology","qnap","truenas","freenas","unraid","server","proxmox","esxi","vmware")
+    nas_v = ("synology","qnap","asustor","wd","western digital","seagate","netapp","dell emc","hpe")
+    if any(x in h for x in nas_h) or any(x in v for x in nas_v):
+        return "NAS/Server"
+
+    if _is_randomized_mac(mac):
+        return "[Randomized MAC]"
+
+    return "Unknown (vendor-based)" if vendor else "Unknown"
 
 def _get_devices_snapshot():
     hotspot = _read_hotspot_table()      # mac -> {mac, ip, name, online}
@@ -431,8 +487,9 @@ def _get_devices_snapshot():
             or d.get("hostname")
             or None
         )
+        if display_name == "Home" : display_name = d.get("hostname")
 
-        dtype = _guess_device_type(vendor, display_name or d.get("hostname") or "")
+        dtype = _guess_device_type(mac, vendor, display_name or d.get("hostname") or "")
 
         ip = h.get("ip")
         if not ip or ip == "0.0.0.0":
@@ -456,7 +513,7 @@ def _get_devices_snapshot():
 
         vendor = _vendor_from_mac(mac)
         display_name = d.get("dhcp_name") or d.get("hostname") or None
-        dtype = _guess_device_type(vendor, display_name or "")
+        dtype = _guess_device_type(mac, vendor, display_name or "")
 
         by_mac[mac] = {
             "mac": mac,
