@@ -4,6 +4,7 @@
 - [ ] Allow `tcpdump` a specific device
 - [ ] Build network graph or traffic map
 - [ ] Add manual packets inspetion
+- [ ] Add constant background network traffic scan
 - ...
 
 ### In Progress
