@@ -27,6 +27,10 @@
         <th>bps</th>
         <th>ext_ip</th>
         <th>domain</th>
+        <th>TCP SYN</th>
+        <th>TCP RST</th>
+        <th>TCP ACK</th>
+        <th>TCP FIN</th>
     </tr>
 
     {% for f in flows %}
@@ -43,6 +47,10 @@
         <td>{{ "%.1f"|format(f.bps) }}</td>
         <td>{{ f.ext_ip or "" }}</td>
         <td>{{ f.domain or "" }}</td>
+        <td>{{ f.tcp_syn }}</td>
+        <td>{{ f.tcp_rst }}</td>
+        <td>{{ f.tcp_ack }}</td>
+        <td>{{ f.tcp_fin }}</td>
     </tr>
     {% endfor %}
 </table>
