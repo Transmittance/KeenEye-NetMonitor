@@ -29,12 +29,19 @@ class FlowStats:
     proto: str
     t_start: float
     t_end: float
+
     packets: int = 0
     bytes: int = 0
     fwd_packets: int = 0
     fwd_bytes: int = 0
     rev_packets: int = 0
     rev_bytes: int = 0
+
+    # TCP flags counters (0 for non-TCP)
+    tcp_syn: int = 0
+    tcp_rst: int = 0
+    tcp_ack: int = 0
+    tcp_fin: int = 0
 
 #1 ––––––––––- pcap to flows with dns ––––––––––-
 
@@ -76,11 +83,9 @@ def build_dns_cache(path):
     return ip2domain
 
 def normalize_key(src, dst, sport, dport, proto):
-    a = (src, dst, sport, dport, proto)
-    b = (dst, src, dport, sport, proto)
-    if a <= b:
-        return a, True
-    return b, False
+    if (src, sport) <= (dst, dport):
+        return (src, dst, sport, dport, proto), True
+    return (dst, src, dport, sport, proto), False
 
 def finalize_flow(f, ip2domain=None):
     duration = max(0.0, f.t_end - f.t_start)
@@ -110,6 +115,9 @@ def finalize_flow(f, ip2domain=None):
     out["ext_ip"] = ext_ip
     out["domain"] = domain
     return out
+
+def _flag(v):
+    return str(v).strip().lower() in ("1", "true", "yes")
 
 def pcap_to_flows(path, idle_timeout=30.0, active_timeout=300.0, ip2domain=None):
     cap = pyshark.FileCapture(path, keep_packets=False)
@@ -170,6 +178,12 @@ def pcap_to_flows(path, idle_timeout=30.0, active_timeout=300.0, ip2domain=None)
         else:
             f.rev_packets += 1
             f.rev_bytes += length
+
+        if proto == "TCP":
+            f.tcp_syn += _flag(pkt.tcp.flags_syn)
+            f.tcp_rst += _flag(pkt.tcp.flags_reset)
+            f.tcp_ack += _flag(pkt.tcp.flags_ack)
+            f.tcp_fin += _flag(pkt.tcp.flags_fin)
 
     cap.close()
 
