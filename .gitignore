@@ -24,7 +24,7 @@ ENV/
 *~
 
 # Project-specific
-./pcaps/
+pcaps/
 
 # Flask
 instance/
