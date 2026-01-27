@@ -6,6 +6,7 @@
 - [ ] Add constant background network traffic scan
 - [ ] Detect port `SSH` brute, `FTP` brute, `Telnet` brute, `RDP` brute
 - [ ] Detect `C2` `beaconing`
+– [ ] Add DNS configuring ???
 - ...
 
 ### In Progress
