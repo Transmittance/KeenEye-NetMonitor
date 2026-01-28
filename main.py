@@ -663,5 +663,5 @@ def devices_api():
     return jsonify({"ok": True, "devices": _get_devices_snapshot()})
 
 if __name__ == '__main__':
-    app.run(host="192.168.1.130", port=5001)
+    app.run(host="192.168.1.64", port=5001)
     app.secret_key = 'k8BB8IsrvPg1ERYW7bfqyptmbHw3hzyh'
