@@ -1,4 +1,4 @@
-from flask import Response, Flask, render_template, session, request, jsonify
+from flask import Response, Flask, render_template, request, jsonify
 import os, re, time, pyshark, uuid, threading, json, csv
 from dataclasses import dataclass, asdict
 import ipaddress
