@@ -12,7 +12,7 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 ROUTER_HOST = "192.168.1.1"
 ROUTER_USER = "root"
 ROUTER_KEY = os.path.expanduser("~/.ssh/keeneye_router")
-ROUTER_SCRIPT = "/opt/capture_and_send.sh"
+ROUTER_SINGLE_CAPTURE_SCRIPT = "/opt/keeneye/capture_and_send.sh"
 
 UPLOAD_DIR = "pcaps"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -224,7 +224,7 @@ def _run_capture_job(job_id, limit_packets):
             auth_timeout=10,
         )
 
-        cmd = f"sh {ROUTER_SCRIPT} {job_id} {int(limit_packets)}"
+        cmd = f"sh {ROUTER_SINGLE_CAPTURE_SCRIPT} {job_id} {int(limit_packets)}"
         stdin, stdout, stderr = ssh.exec_command(cmd, get_pty=True)
         chan = stdout.channel
 
