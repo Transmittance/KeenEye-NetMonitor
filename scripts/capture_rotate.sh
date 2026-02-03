@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-IFACE="${1:-br0}"
-OUT_DIR="${2:-/opt/keeneye/continious_capture}"
-CHUNK_SEC="${3:-5}"
+IFACE="$1"
+OUT_DIR="$2"
+CHUNK_SEC="$3"
 PID_FILE="${OUT_DIR}/capture.pid"
 
 mkdir -p "$OUT_DIR"

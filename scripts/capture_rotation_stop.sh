@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-OUT_DIR="${1:-/opt/keeneye/continious_capture}"
+OUT_DIR="$1"
 PID_FILE="${OUT_DIR}/capture.pid"
 
 if [ ! -f "$PID_FILE" ]; then
