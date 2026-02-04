@@ -1,0 +1,20 @@
+{
+  "flows_total": 1.0,
+  "pkts_out": 8.0,
+  "pkts_in": 9.0,
+  "bytes_out": 1673.5,
+  "bytes_in": 2460.0,
+  "tcp_flows": 1.0,
+  "udp_flows": 0.0,
+  "unique_dst_ports": 1.0,
+  "unique_dst_ips": 1.0,
+  "mean_flow_duration": 1.0522369742393494,
+  "p95_flow_duration": 1.3763111889362334,
+  "mean_packets_per_flow": 9.0,
+  "p95_packets_per_flow": 9.0,
+  "syn_count": 0.0,
+  "rst_count": 0.0,
+  "entropy_dst_port": -0.0,
+  "entropy_dst_ip": -0.0,
+  "rst_per_syn": 0.0
+}
