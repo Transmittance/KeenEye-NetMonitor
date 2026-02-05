@@ -35,8 +35,8 @@
 
     {% for f in flows %}
     <tr>
-        <td>{{ f.src }}</td>
-        <td>{{ f.dst }}</td>
+        <td>{{ f.initiator }}</td>
+        <td>{{ f.responder }}</td>
         <td>{{ f.sport }}</td>
         <td>{{ f.dport }}</td>
         <td>{{ f.proto }}</td>
