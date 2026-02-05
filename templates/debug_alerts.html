@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KeenEye Debug Monitor</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; background: #fff; }
+    .status { min-width: 320px; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid #ddd; }
+    .ok { background: #e9f8ee; border-color: #b8e6c7; }
+    .bad { background: #fdecec; border-color: #f3b3b3; }
+    .muted { color: #666; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+    table { width: 100%; border-collapse: collapse; }
+    td, th { border-bottom: 1px solid #eee; padding: 6px 8px; vertical-align: top; }
+    th { text-align: left; font-weight: 600; }
+    .log { max-height: 70vh; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+    .alert { border-left: 4px solid #d22; padding-left: 10px; }
+    .sys { border-left: 4px solid #888; padding-left: 10px; }
+    .line { padding: 8px 0; border-bottom: 1px dashed #eee; }
+    .topTargets { margin-top: 6px; }
+    .small { font-size: 12px; }
+    .controls input { padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px; }
+    .controls button { padding: 6px 10px; border: 1px solid #ddd; border-radius: 8px; background: #f7f7f7; cursor: pointer; }
+    .controls button:hover { background: #efefef; }
+  </style>
+</head>
+<body>
+  <h2>KeenEye — Debug Monitor</h2>
+
+  <div class="row controls">
+    <label class="muted">API base:</label>
+    <input id="baseUrl" value="http://192.168.1.63:5001" size="28" />
+    <label class="muted">Poll (ms):</label>
+    <input id="pollMs" value="1000" size="6" />
+    <button id="applyBtn">Apply</button>
+    <span id="connPill" class="pill bad">Disconnected</span>
+    <span class="muted small" id="lastUpdate">—</span>
+  </div>
+
+  <div class="grid" style="margin-top: 12px;">
+    <div class="card status">
+      <h3 style="margin: 0 0 8px;">Status</h3>
+      <table>
+        <tbody id="statusBody">
+          <tr><td class="muted">—</td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3 style="margin: 0 0 8px;">Summary</h3>
+      <div class="row">
+        <span class="pill" id="cntAll">Events: 0</span>
+        <span class="pill" id="cntAlerts">Alerts: 0</span>
+        <span class="pill" id="cntSys">System: 0</span>
+      </div>
+      <div style="margin-top:10px" class="muted small">
+        Tip: Alerts are items with <code>type="alert"</code>. Logs are <code>type="system"</code> (or anything else you push).
+      </div>
+    </div>
+  </div>
+
+  <div class="grid" style="margin-top: 12px;">
+    <div class="card">
+      <h3 style="margin: 0 0 8px;">Alerts</h3>
+      <div id="alertsBox" class="log"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin: 0 0 8px;">Log</h3>
+      <div id="logBox" class="log"></div>
+    </div>
+  </div>
+
+<script>
+  let timer = null;
+  let lastSeenTs = null;
+
+  function el(id) { return document.getElementById(id); }
+
+  function fmt(v) {
+    if (v === null || v === undefined) return "—";
+    if (typeof v === "number") return Number.isFinite(v) ? v.toFixed(4).replace(/\.?0+$/,'') : String(v);
+    if (typeof v === "object") return JSON.stringify(v);
+    return String(v);
+  }
+
+  function setConn(ok) {
+    const p = el("connPill");
+    p.textContent = ok ? "Connected" : "Disconnected";
+    p.className = "pill " + (ok ? "ok" : "bad");
+  }
+
+  async function fetchJson(url) {
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  }
+
+  function renderStatus(status) {
+    const keys = Object.keys(status || {});
+    const rows = keys.map(k => `<tr><th>${k}</th><td>${fmt(status[k])}</td></tr>`).join("");
+    el("statusBody").innerHTML = rows || `<tr><td class="muted">—</td><td>—</td></tr>`;
+  }
+
+  function renderAlertsAndLogs(events) {
+    const all = Array.isArray(events) ? events : [];
+    const alerts = all.filter(e => e.type === "alert");
+    const sys = all.filter(e => e.type !== "alert");
+
+    el("cntAll").textContent = `Events: ${all.length}`;
+    el("cntAlerts").textContent = `Alerts: ${alerts.length}`;
+    el("cntSys").textContent = `System: ${sys.length}`;
+
+    // newest first
+    const alertsHtml = alerts.slice().reverse().map(e => {
+      const top = Array.isArray(e.top_targets) ? e.top_targets : [];
+      const topHtml = top.length ? `
+        <div class="topTargets small">
+          <div class="muted">Top targets:</div>
+          <table class="small">
+            <thead><tr><th>dst</th><th>flows</th><th>ports</th><th>SYN</th><th>RST</th></tr></thead>
+            <tbody>
+              ${top.map(t => `
+                <tr>
+                  <td>${fmt(t.dst)}</td>
+                  <td>${fmt(t.flows_total)}</td>
+                  <td>${fmt(t.unique_dst_ports)}</td>
+                  <td>${fmt(t.syn_count)}</td>
+                  <td>${fmt(t.rst_count)}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>` : "";
+
+      return `
+        <div class="line alert">
+          <div><b>${fmt(e.ts)}</b> <span class="pill bad">ALERT</span></div>
+          <div>${fmt(e.message)}</div>
+          <div class="small muted">src=${fmt(e.src)} p=${fmt(e.proba)} pcap=${fmt(e.pcap)}</div>
+          ${topHtml}
+        </div>`;
+    }).join("");
+
+    const logHtml = sys.slice().reverse().map(e => `
+      <div class="line sys">
+        <div><b>${fmt(e.ts)}</b> <span class="pill">LOG</span></div>
+        <div>${fmt(e.message || e.type || e)}</div>
+      </div>
+    `).join("");
+
+    el("alertsBox").innerHTML = alertsHtml || `<div class="muted">No alerts yet.</div>`;
+    el("logBox").innerHTML = logHtml || `<div class="muted">No log events yet.</div>`;
+
+    // update last update time
+    el("lastUpdate").textContent = "Last update: " + new Date().toLocaleTimeString();
+  }
+
+  async function tick() {
+    const base = el("baseUrl").value.replace(/\/+$/,"");
+    try {
+      const [status, events] = await Promise.all([
+        fetchJson(base + "/api/status"),
+        fetchJson(base + "/api/alerts"),
+      ]);
+      setConn(true);
+      renderStatus(status);
+      renderAlertsAndLogs(events);
+    } catch (e) {
+      setConn(false);
+      // keep last rendered data, just show disconnected
+    }
+  }
+
+  function startPolling() {
+    if (timer) clearInterval(timer);
+    const ms = Math.max(250, parseInt(el("pollMs").value || "1000", 10));
+    timer = setInterval(tick, ms);
+    tick();
+  }
+
+  el("applyBtn").addEventListener("click", startPolling);
+  startPolling();
+</script>
+</body>
+</html>
