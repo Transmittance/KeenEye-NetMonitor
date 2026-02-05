@@ -1,8 +1,14 @@
+from pathlib import Path
 from flask import Response, Flask, render_template, request, jsonify
-import os, re, time, pyshark, uuid, threading, json, csv
+import sys, os, re, time, pyshark, uuid, threading, json, csv, signal
+from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
 import ipaddress
 import paramiko
+import numpy as np
+import pandas as pd
+from catboost import CatBoostClassifier
+import subprocess
 
 app = Flask(__name__)
 app.secret_key = "k8BB8IsrvPg1ERYW7bfqyptmbHw3hzyh"
@@ -14,11 +20,47 @@ ROUTER_USER = "root"
 ROUTER_KEY = os.path.expanduser("~/.ssh/keeneye_router")
 ROUTER_SINGLE_CAPTURE_SCRIPT = "/opt/keeneye/capture_and_send.sh"
 
+REMOTE_PCAP_DIR = "/opt/keeneye/captures/continious_capture"
+REMOTE_CAPTURE_SH = "/opt/keeneye/capture_rotate.sh"
+REMOTE_STOP_SH = "/opt/keeneye/capture_rotation_stop.sh"
+CHUNK_SEC = 5
+
+LOCAL_SPOOL_DIR = "spool"
+os.makedirs(LOCAL_SPOOL_DIR, exist_ok=True)
+
+MODEL_PATH = "./port_scanning/portscan_detection_cb.cbm"
+
+ALERT_THRESHOLD = 0.4
+ALERT_K = 1
+ALERT_WINDOW_SEC = 60
+
+DELETE_REMOTE_AFTER_DOWNLOAD = False
+DELETE_LOCAL_AFTER_PROCESS = False
+
+capture_ssh = None
+capture_ssh_lock = threading.Lock()
+
+with open("./port_scanning/fill_median.json") as f:
+    FILLNA_MEDIAN = json.load(f)
+
 UPLOAD_DIR = "pcaps"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 _jobs = {}
 _jobs_lock = threading.Lock()
+
+FEATURES = [
+    'flows_total',
+    'pkts_out', 'pkts_in',
+    'bytes_out', 'bytes_in',
+    'tcp_flows', 'udp_flows',
+    'unique_dst_ports', 'unique_dst_ips',
+    'mean_flow_duration', 'p95_flow_duration',
+    'mean_packets_per_flow', 'p95_packets_per_flow',
+    'syn_count', 'rst_count',
+    'entropy_dst_port', 'entropy_dst_ip',
+    'rst_per_syn'
+]
 
 @dataclass
 class FlowStats:
@@ -42,6 +84,11 @@ class FlowStats:
     tcp_rst: int = 0
     tcp_ack: int = 0
     tcp_fin: int = 0
+
+    # Fields that help identify the initiator
+    initiator: str = None
+    responder: str = None
+    initiator_is_key_src: bool = True
 
 #1 ––––––––––- pcap to flows with dns ––––––––––-
 
@@ -114,6 +161,9 @@ def finalize_flow(f, ip2domain=None):
 
     out["ext_ip"] = ext_ip
     out["domain"] = domain
+    out["initiator"] = f.initiator
+    out["responder"] = f.responder
+    out["initiator_is_key_src"] = f.initiator_is_key_src
     return out
 
 def _flag(v):
@@ -153,18 +203,27 @@ def pcap_to_flows(path, idle_timeout=30.0, active_timeout=300.0, ip2domain=None)
         key, is_fwd = normalize_key(src, dst, sport, dport, proto)
 
         if key not in flows:
+            first_src = src
+            first_dst = dst
+
             flows[key] = FlowStats(
                 src=key[0], dst=key[1], sport=key[2], dport=key[3], proto=key[4],
-                t_start=ts, t_end=ts
+                t_start=ts, t_end=ts, initiator=first_src, responder=first_dst,
+                initiator_is_key_src=(first_src == key[0])
             )
 
         f = flows[key]
+        from_initiator = (src == f.initiator)
 
         if (ts - f.t_end) > idle_timeout or (ts - f.t_start) > active_timeout:
             close_flow(key)
+            first_src = src
+            first_dst = dst
+
             flows[key] = FlowStats(
                 src=key[0], dst=key[1], sport=key[2], dport=key[3], proto=key[4],
-                t_start=ts, t_end=ts
+                t_start=ts, t_end=ts, initiator=first_src, responder=first_dst,
+                initiator_is_key_src=(first_src == key[0])
             )
             f = flows[key]
 
@@ -172,7 +231,7 @@ def pcap_to_flows(path, idle_timeout=30.0, active_timeout=300.0, ip2domain=None)
         f.bytes += length
         f.t_end = ts
 
-        if is_fwd:
+        if from_initiator:
             f.fwd_packets += 1
             f.fwd_bytes += length
         else:
@@ -184,6 +243,14 @@ def pcap_to_flows(path, idle_timeout=30.0, active_timeout=300.0, ip2domain=None)
             f.tcp_rst += _flag(pkt.tcp.flags_reset)
             f.tcp_ack += _flag(pkt.tcp.flags_ack)
             f.tcp_fin += _flag(pkt.tcp.flags_fin)
+
+            syn = _flag(pkt.tcp.flags_syn)
+            ack = _flag(pkt.tcp.flags_ack)
+            if syn and not ack:
+                flows[key].initiator = str(pkt.ip.src)
+                flows[key].responder = str(pkt.ip.dst)
+                flows[key].initiator_is_key_src = (flows[key].initiator == flows[key].src)
+                from_initiator = (src == f.initiator)
 
     cap.close()
 
@@ -552,7 +619,347 @@ def _get_devices_snapshot():
 
     return devices
 
-#4 ––––––––––- flask routes ––––––––––-
+#4 ––––––––––- packet inspection for port scanning ––––––––––-
+
+def entropy(s):
+    vc = s.value_counts()
+    if vc.sum() == 0:
+        return 0.0
+    p = vc / vc.sum()
+    return float(-(p * np.log2(p)).sum())
+
+def p95(s):
+    return float(s.quantile(0.95)) if len(s) else 0.0
+
+def agg_src(df, pcap_name):
+    df = df.copy()
+    df["pcap"] = pcap_name
+
+    g = df.groupby(["pcap", "initiator"], as_index=False)
+
+    out = g.agg(
+        flows_total=("proto", "size"),
+        pkts_out=("fwd_packets", "sum"),
+        pkts_in=("rev_packets", "sum"),
+        bytes_out=("fwd_bytes", "sum"),
+        bytes_in=("rev_bytes", "sum"),
+        tcp_flows=("proto", lambda s: int((s == "TCP").sum())),
+        udp_flows=("proto", lambda s: int((s == "UDP").sum())),
+        unique_dst_ports=("dport", pd.Series.nunique),
+        unique_dst_ips=("dst", pd.Series.nunique),
+        mean_flow_duration=("duration", "mean"),
+        p95_flow_duration=("duration", p95),
+        mean_packets_per_flow=("packets", "mean"),
+        p95_packets_per_flow=("packets", p95),
+        syn_count=("tcp_syn", "sum"),
+        rst_count=("tcp_rst", "sum"),
+    )
+
+    ent_port = df.groupby(["pcap", "initiator"])["dport"].apply(entropy).reset_index(name="entropy_dst_port")
+    ent_ip   = df.groupby(["pcap", "initiator"])["dst"].apply(entropy).reset_index(name="entropy_dst_ip")
+    out = out.merge(ent_port, on=["pcap","initiator"], how="left").merge(ent_ip, on=["pcap","initiator"], how="left")
+
+    out["rst_per_syn"] = out["rst_count"] / (out["syn_count"] + 1.0)
+
+    for c in FEATURES:
+        if c not in out.columns:
+            out[c] = 0.0
+
+    out = out.rename(columns={"initiator": "src"})
+
+    return out[["pcap", "src"] + FEATURES]
+
+def agg_pair(df, pcap_name):
+    df = df.copy()
+    df["pcap"] = pcap_name
+    g = df.groupby(["pcap", "initiator", "responder"], as_index=False)
+    out = g.agg(
+        flows_total=("proto", "size"),
+        unique_dst_ports=("dport", pd.Series.nunique),
+        syn_count=("tcp_syn", "sum"),
+        rst_count=("tcp_rst", "sum"),
+    )
+    return out.rename(columns={"initiator": "src", "responder": "dst"})
+
+stop_event = threading.Event()
+
+alerts_lock = threading.Lock()
+alerts = []
+MAX_ALERTS = 300
+
+seen_lock = threading.Lock()
+seen_remote = set()
+
+sus_lock = threading.Lock()
+sus_times = {}
+
+model = CatBoostClassifier()
+model.load_model(MODEL_PATH)
+
+def push(ev):
+    ev.setdefault("ts", datetime.utcnow().isoformat() + "Z")
+    with alerts_lock:
+        alerts.append(ev)
+        if len(alerts) > MAX_ALERTS:
+            del alerts[:-MAX_ALERTS]
+
+def start_capture():
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(
+        ROUTER_HOST,
+        port=222,
+        username=ROUTER_USER,
+        key_filename=ROUTER_KEY,
+        timeout=10,
+        banner_timeout=10,
+        auth_timeout=10,
+    )
+    cmd = (
+        f"{REMOTE_CAPTURE_SH} br0 {REMOTE_PCAP_DIR} {CHUNK_SEC} "
+        f"</dev/null >/opt/keeneye/captures/keeneye_capture.log 2>&1 & echo $!"
+    )
+
+    _, stdout, _ = ssh.exec_command(cmd)
+    pid = stdout.read().decode(errors="ignore").strip()
+    push({"type": "system", "message": f"capture started pid={pid}"})
+    return ssh
+
+def stop_capture(ssh):
+    try:
+        ssh.exec_command(f"{REMOTE_STOP_SH} {REMOTE_PCAP_DIR}")
+        push({"type": "system", "message": "capture stopped"})
+    except Exception as e:
+        push({"type": "system", "message": f"stop failed: {e}"})
+
+def apply_alerts(df_src, df_pair, pcap_name):
+    if df_src.empty:
+        return
+
+    push({"type": "system", "message": f"new pcap: {pcap_name}"})
+    X = df_src[FEATURES].replace([np.inf, -np.inf], np.nan).astype(float)
+    X = X.fillna(pd.Series(FILLNA_MEDIAN))
+    proba = model.predict_proba(X)[:, 1]
+    df_src = df_src.copy()
+    df_src["proba"] = proba
+
+    now = datetime.utcnow()
+    cutoff = now - timedelta(seconds=ALERT_WINDOW_SEC)
+
+    for r in df_src.itertuples(index=False):
+        if r.flows_total < 3:
+            continue
+        if r.syn_count == 0 and r.flows_total <= 1:
+            continue
+        src = r.src
+        p = float(r.proba)
+
+        push({"type": "system", "message": f"src={src} proba={p:.3f}"})
+
+        if p < ALERT_THRESHOLD:
+            continue
+
+        with sus_lock:
+            lst = sus_times.get(src, [])
+            lst.append(now)
+            lst = [t for t in lst if t >= cutoff]
+            sus_times[src] = lst
+
+            if len(lst) >= ALERT_K:
+                top = []
+                if df_pair is not None and not df_pair.empty:
+                    sub = df_pair[df_pair["src"] == src].sort_values("flows_total", ascending=False).head(5)
+                    for rr in sub.itertuples(index=False):
+                        top.append({
+                            "dst": rr.dst,
+                            "flows_total": int(rr.flows_total),
+                            "unique_dst_ports": int(rr.unique_dst_ports),
+                            "syn_count": int(rr.syn_count),
+                            "rst_count": int(rr.rst_count),
+                        })
+
+                push({
+                    "type": "alert",
+                    "pcap": pcap_name,
+                    "src": src,
+                    "proba": p,
+                    "message": f"Port scan suspected from {src} (p={p:.3f}, {ALERT_K} in {ALERT_WINDOW_SEC}s)",
+                    "top_targets": top,
+                })
+                sus_times[src] = []
+
+def rsync_pull():
+    ssh_cmd = f"ssh -p 222 -i {ROUTER_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+    remote = f"{ROUTER_USER}@{ROUTER_HOST}:{REMOTE_PCAP_DIR}/"
+    local  = str(LOCAL_SPOOL_DIR) + "/"
+
+    r = subprocess.run(
+        [
+            "rsync", "-az",
+            "--ignore-existing",
+            "--include=*.pcap", "--exclude=*",
+            "-e", ssh_cmd,
+            remote, local
+        ],
+        capture_output=True,
+        text=True
+    )
+    if r.returncode != 0:
+        push({"type":"system","message": f"rsync failed rc={r.returncode}: {r.stderr.strip()}"})
+    else:
+        push({"type":"system","message": "rsync ok"})
+
+def list_new_local_pcaps():
+    return sorted(
+        Path(LOCAL_SPOOL_DIR) / f
+        for f in os.listdir(LOCAL_SPOOL_DIR)
+        if f.endswith(".pcap")
+    )
+
+def worker():
+    global capture_ssh
+    ssh = None
+    try:
+        ssh = start_capture()
+        with capture_ssh_lock:
+            capture_ssh = ssh
+
+        while not stop_event.is_set():
+            try:
+                rsync_pull()
+
+                for p in list_new_local_pcaps():
+                    n = p.name
+                    with seen_lock:
+                        if n in seen_remote:
+                            continue
+                        seen_remote.add(n)
+
+                    try:
+                        ip2domain = build_dns_cache(str(p))
+                        flows = pcap_to_flows(str(p), ip2domain=ip2domain)
+                        df = pd.DataFrame(flows)
+
+                        if not df.empty:
+                            df_src = agg_src(df, n)
+                            df_pair = agg_pair(df, n)
+                            apply_alerts(df_src, df_pair, n)
+                                
+                        if DELETE_LOCAL_AFTER_PROCESS:
+                            try:
+                                p.unlink()
+                            except Exception:
+                                pass
+
+                    except Exception as e:
+                        push({"type": "system", "message": f"process failed {n}: {e}"})
+
+                time.sleep(0.5)
+
+            except Exception as e:
+                push({"type": "system", "message": f"loop error: {e}"})
+                time.sleep(1.0)
+
+    finally:
+        if ssh is not None:
+            try:
+                stop_capture(ssh)
+            except Exception as e:
+                push({"type": "system", "message": f"stop_capture failed: {e}"})
+
+            try:
+                cleanup_remote_spool(ssh)
+            except Exception:
+                pass
+    
+            try:
+                ssh.close()
+            except Exception as e:
+                push({"type": "system", "message": f"ssh close failed: {e}"})
+
+        with capture_ssh_lock:
+            capture_ssh = None
+
+def cleanup_local_spool():
+    try:
+        for f in os.listdir(LOCAL_SPOOL_DIR):
+            if f.endswith(".pcap"):
+                os.unlink(os.path.join(LOCAL_SPOOL_DIR, f))
+    except Exception as e:
+        push({"type": "system", "message": f"cleanup local spool failed: {e}"})
+
+def cleanup_remote_spool(ssh):
+    try:
+        ssh.exec_command(f"rm -f {REMOTE_PCAP_DIR}/*.pcap")
+    except Exception as e:
+        push({"type": "system", "message": f"cleanup remote spool failed: {e}"})
+
+
+@app.get("/api/alerts")
+def api_alerts():
+    with alerts_lock:
+        return jsonify(alerts[-MAX_ALERTS:])
+
+@app.get("/api/status")
+def api_status():
+    return jsonify({
+        "running": not stop_event.is_set(),
+        "router": f"{ROUTER_USER}@{ROUTER_HOST}:{222}",
+        "iface": "br0",
+        "remote_dir": REMOTE_PCAP_DIR,
+        "chunk_sec": CHUNK_SEC,
+        "threshold": ALERT_THRESHOLD,
+        "K": ALERT_K,
+        "window_sec": ALERT_WINDOW_SEC,
+        "model": MODEL_PATH,
+        "local_spool": str(LOCAL_SPOOL_DIR),
+    })
+
+_worker_thread = None
+
+def start_worker():
+    global _worker_thread
+    if _worker_thread and _worker_thread.is_alive():
+        return
+    _worker_thread = threading.Thread(target=worker, daemon=True)
+    _worker_thread.start()
+    push({"type": "system", "message": "worker started"})
+
+def shutdown_handler(signum, frame):
+    global capture_ssh
+    stop_event.set()
+
+    with capture_ssh_lock:
+        ssh = capture_ssh
+        capture_ssh = None
+
+    if ssh is not None:
+        try:
+            stop_capture(ssh)
+        except Exception as e:
+            push({"type":"system", "message": f"stop_capture in handler failed: {e}"})
+
+        try:
+            cleanup_remote_spool(ssh)
+        except Exception:
+            pass
+        
+        try:
+            ssh.close()
+        except Exception:
+            pass
+
+        cleanup_local_spool()
+
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, shutdown_handler)
+signal.signal(signal.SIGTERM, shutdown_handler)
+
+start_worker()
+
+#5 ––––––––––- flask routes ––––––––––-
 
 @app.post("/capture/start")
 def capture_start():
@@ -662,6 +1069,10 @@ def devices_page():
 def devices_api():
     return jsonify({"ok": True, "devices": _get_devices_snapshot()})
 
+@app.get("/debug_alerts")
+def debug_page():
+    return render_template("debug_alerts.html")
+
 if __name__ == '__main__':
-    app.run(host="192.168.1.64", port=5001)
+    app.run(host="192.168.1.63", port=5001, use_reloader=False)
     app.secret_key = 'k8BB8IsrvPg1ERYW7bfqyptmbHw3hzyh'
