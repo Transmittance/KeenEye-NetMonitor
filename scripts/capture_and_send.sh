@@ -2,7 +2,7 @@
 
 PCAP_DIR="./captures"
 PCAP="$PCAP_DIR/cap.pcap"
-SERVER="http://192.168.1.130:5001/upload_pcap"
+SERVER="http://192.168.1.63:5001/upload_pcap"
 
 JOB_ID="$1"
 LIMIT="$2"
