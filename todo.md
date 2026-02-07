@@ -10,10 +10,10 @@
 - ...
 
 ### In Progress
-- [ ] Detect port scanning
 - [ ] Add manual packets inspetion
-- [ ] Add constant background network traffic scan
 
 ### Completed 
 - ✅ Define a device by its `MAC address` ––––> **as done as possible**
 - ✅ Convert `pcap` to `flows`, extract features and them feed them to ML
+- ✅ Detect port scanning
+- ✅ Add constant background network traffic scan
