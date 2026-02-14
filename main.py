@@ -30,8 +30,8 @@ os.makedirs(LOCAL_SPOOL_DIR, exist_ok=True)
 
 MODEL_PATH = "./port_scanning/portscan_detection_cb.cbm"
 
-ALERT_THRESHOLD = 0.4
-ALERT_K = 1
+ALERT_THRESHOLD = 0.8
+ALERT_K = 2
 ALERT_WINDOW_SEC = 60
 
 DELETE_REMOTE_AFTER_DOWNLOAD = False
@@ -806,8 +806,6 @@ def rsync_pull():
     )
     if r.returncode != 0:
         push({"type":"system","message": f"rsync failed rc={r.returncode}: {r.stderr.strip()}"})
-    else:
-        push({"type":"system","message": "rsync ok"})
 
 def list_new_local_pcaps():
     return sorted(
