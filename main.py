@@ -484,7 +484,7 @@ def _vendor_from_mac(mac):
     if not m: "Bad MAC"
 
     if _is_randomized_mac(mac):
-        return "[Randomized MAC]"
+        return "[Private]"
     return DB.get(m[:9]) or DB.get(m[:7]) or DB.get(m[:6])
 
 def _guess_device_type(mac, vendor, hostname):
@@ -548,7 +548,7 @@ def _guess_device_type(mac, vendor, hostname):
         return "NAS/Server"
 
     if _is_randomized_mac(mac):
-        return "[Randomized MAC]"
+        return "[Private]"
 
     return "Unknown (vendor-based)" if vendor else "Unknown"
 
