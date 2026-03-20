@@ -9,11 +9,17 @@ import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier
 import subprocess
+import shlex
 
 app = Flask(__name__)
 app.secret_key = "k8BB8IsrvPg1ERYW7bfqyptmbHw3hzyh"
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+
+LOCAL_API_HOST = os.getenv("KEENEYE_LOCAL_IP", "192.168.1.82")
+LOCAL_API_PORT = int(os.getenv("KEENEYE_LOCAL_PORT", "5001"))
+LOCAL_API_BASE_URL = f"http://{LOCAL_API_HOST}:{LOCAL_API_PORT}"
+UPLOAD_PCAP_URL = f"{LOCAL_API_BASE_URL}/upload_pcap"
 
 ROUTER_HOST = "192.168.1.1"
 ROUTER_USER = "root"
@@ -30,8 +36,8 @@ os.makedirs(LOCAL_SPOOL_DIR, exist_ok=True)
 
 MODEL_PATH = "./port_scanning/portscan_detection_cb.cbm"
 
-ALERT_THRESHOLD = 0.8
-ALERT_K = 2
+ALERT_THRESHOLD = 0.75
+ALERT_K = 1
 ALERT_WINDOW_SEC = 60
 
 DELETE_REMOTE_AFTER_DOWNLOAD = False
@@ -291,7 +297,7 @@ def _run_capture_job(job_id, limit_packets):
             auth_timeout=10,
         )
 
-        cmd = f"sh {ROUTER_SINGLE_CAPTURE_SCRIPT} {job_id} {int(limit_packets)}"
+        cmd = f"KEENEYE_SERVER_URL={shlex.quote(UPLOAD_PCAP_URL)} sh {ROUTER_SINGLE_CAPTURE_SCRIPT} {job_id} {int(limit_packets)}"
         stdin, stdout, stderr = ssh.exec_command(cmd, get_pty=True)
         chan = stdout.channel
 
@@ -814,6 +820,26 @@ def list_new_local_pcaps():
         if f.endswith(".pcap")
     )
 
+def process_pcap_for_alerts(path, pcap_name):
+    ip2domain = build_dns_cache(path)
+    flows = pcap_to_flows(path, ip2domain=ip2domain)
+    df = pd.DataFrame(flows)
+    if df.empty:
+        return
+
+    df_src = agg_src(df, pcap_name)
+    df_pair = agg_pair(df, pcap_name)
+    apply_alerts(df_src, df_pair, pcap_name)
+
+def process_uploaded_pcap_async(path, pcap_name):
+    def _task():
+        try:
+            process_pcap_for_alerts(path, pcap_name)
+        except Exception as e:
+            push({"type": "system", "message": f"uploaded pcap process failed {pcap_name}: {e}"})
+
+    threading.Thread(target=_task, daemon=True).start()
+
 def worker():
     global capture_ssh
     ssh = None
@@ -834,14 +860,7 @@ def worker():
                         seen_remote.add(n)
 
                     try:
-                        ip2domain = build_dns_cache(str(p))
-                        flows = pcap_to_flows(str(p), ip2domain=ip2domain)
-                        df = pd.DataFrame(flows)
-
-                        if not df.empty:
-                            df_src = agg_src(df, n)
-                            df_pair = agg_pair(df, n)
-                            apply_alerts(df_src, df_pair, n)
+                        process_pcap_for_alerts(str(p), n)
                                 
                         if DELETE_LOCAL_AFTER_PROCESS:
                             try:
@@ -955,7 +974,7 @@ def shutdown_handler(signum, frame):
 signal.signal(signal.SIGINT, shutdown_handler)
 signal.signal(signal.SIGTERM, shutdown_handler)
 
-start_worker()
+# start_worker()
 
 #5 ––––––––––- flask routes ––––––––––-
 
@@ -1049,6 +1068,7 @@ def upload_pcap():
     name = f"cap_{int(time.time())}.pcap"
     path = os.path.join(UPLOAD_DIR, name)
     f.save(path)
+    process_uploaded_pcap_async(path, name)
 
     if job_id:
         _job_update(job_id, status="done", line="Done", pcap_name=name)
@@ -1069,8 +1089,8 @@ def devices_api():
 
 @app.get("/debug_alerts")
 def debug_page():
-    return render_template("debug_alerts.html")
+    return render_template("debug_alerts.html", default_base_url=LOCAL_API_BASE_URL)
 
 if __name__ == '__main__':
-    app.run(host="192.168.1.63", port=5001, use_reloader=False)
+    app.run(host=LOCAL_API_HOST, port=LOCAL_API_PORT, use_reloader=False)
     app.secret_key = 'k8BB8IsrvPg1ERYW7bfqyptmbHw3hzyh'
