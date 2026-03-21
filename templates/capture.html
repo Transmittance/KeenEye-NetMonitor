@@ -1,80 +1,27 @@
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Capture</title>
-  <style>
-    body { font-family: monospace; }
-    #line { padding: 10px; border: 1px solid #ccc; margin-top: 10px; }
-    .row { display: flex; gap: 10px; align-items: center; }
-    input { width: 120px; padding: 6px; }
-    button { padding: 6px 10px; }
-  </style>
-</head>
-<body>
-  <div class="row">
-    <label for="limit">Packets:</label>
-    <input id="limit"
-           type="number"
-           inputmode="numeric"
-           min="1"
-           step="1"
-           value="500" />
-    <button id="btn">Start capture</button>
-  </div>
+{% extends "base.html" %}
 
-  <div id="line">idle</div>
+{% block title %}Capture | KeenEye{% endblock %}
 
-  <script>
-    const line = document.getElementById("line");
-    const btn = document.getElementById("btn");
-    const limitInput = document.getElementById("limit");
+{% block content %}
+<section class="hero">
+  <h1>Packet Capture</h1>
+  <p>Run a one-time packet capture on the router and open the generated PCAP automatically once it is ready.</p>
+</section>
 
-    function getLimit() {
-      const v = parseInt(limitInput.value, 10);
-      if (Number.isNaN(v) || v < 1) return 1;
-      return v;
-    }
+<div class="layout-grid">
+  <section class="panel wide">
+    <h2>Run Capture</h2>
+    <div class="row mb-10">
+      <label class="muted" for="limit">Packets:</label>
+      <input id="limit" type="number" inputmode="numeric" min="1" step="1" value="500" />
+      <button id="btn" type="button">Start Capture</button>
+      <span id="statePill" class="pill">idle</span>
+    </div>
+    <div id="line" class="mono muted status-line">Waiting for capture start.</div>
+  </section>
+</div>
+{% endblock %}
 
-    btn.onclick = async () => {
-      btn.disabled = true;
-      limitInput.disabled = true;
-      line.textContent = "Starting...";
-
-      const limit = getLimit();
-
-      const r = await fetch("/capture/start", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({limit})
-      });
-
-      const {job_id} = await r.json();
-
-      const es = new EventSource(`/capture/stream/${job_id}`);
-      es.onmessage = (ev) => {
-        const data = JSON.parse(ev.data);
-
-        line.textContent = data.line || "";
-
-        if (data.status === "done") {
-          es.close();
-          btn.disabled = false;
-          limitInput.disabled = false;
-
-          if (data.pcap_name) {
-            window.location = `/pcap/${data.pcap_name}`;
-          }
-        }
-
-        if (data.status === "failed") {
-          es.close();
-          btn.disabled = false;
-          limitInput.disabled = false;
-          line.textContent = `failed | ${data.error || "error"}`;
-        }
-      };
-    };
-  </script>
-</body>
-</html>
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/capture.js') }}" defer></script>
+{% endblock %}

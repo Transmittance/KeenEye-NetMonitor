@@ -1,59 +1,77 @@
-<!doctype html>
-<html>
-<head>
-    <title>{{ name }}</title>
-    <style>
-        table { border-collapse: collapse; font-family: monospace; }
-        th, td { border: 1px solid #ccc; padding: 4px 6px; }
-        th { background: #eee; }
-    </style>
-</head>
-<body>
+{% extends "base.html" %}
 
-<h2>Flows: {{ name }}</h2>
-<p>Total flows: {{ flows|length }}</p>
+{% block title %}{{ name }} | Flows{% endblock %}
 
-<table>
-    <tr>
-        <th>src</th>
-        <th>dst</th>
-        <th>sport</th>
-        <th>dport</th>
-        <th>proto</th>
-        <th>packets</th>
-        <th>bytes</th>
-        <th>duration</th>
-        <th>pps</th>
-        <th>bps</th>
-        <th>ext_ip</th>
-        <th>domain</th>
-        <th>TCP SYN</th>
-        <th>TCP RST</th>
-        <th>TCP ACK</th>
-        <th>TCP FIN</th>
-    </tr>
+{% block content %}
+<section class="hero">
+  <h1>PCAP Analysis: {{ name }}</h1>
+  <p>Flows are sorted by traffic volume. Use the filters to quickly isolate hosts, domains, ports, and protocol-specific traffic.</p>
+</section>
 
-    {% for f in flows %}
-    <tr>
-        <td>{{ f.initiator }}</td>
-        <td>{{ f.responder }}</td>
-        <td>{{ f.sport }}</td>
-        <td>{{ f.dport }}</td>
-        <td>{{ f.proto }}</td>
-        <td>{{ f.packets }}</td>
-        <td>{{ f.bytes }}</td>
-        <td>{{ "%.3f"|format(f.duration) }}</td>
-        <td>{{ "%.2f"|format(f.pps) }}</td>
-        <td>{{ "%.1f"|format(f.bps) }}</td>
-        <td>{{ f.ext_ip or "" }}</td>
-        <td>{{ f.domain or "" }}</td>
-        <td>{{ f.tcp_syn }}</td>
-        <td>{{ f.tcp_rst }}</td>
-        <td>{{ f.tcp_ack }}</td>
-        <td>{{ f.tcp_fin }}</td>
-    </tr>
-    {% endfor %}
-</table>
+<div class="layout-grid">
+  <section class="panel wide">
+    <div class="row mb-10">
+      <span class="pill">Total Flows: {{ flows|length }}</span>
+      <label class="muted" for="flowFilter">Search:</label>
+      <input id="flowFilter" class="input-wide-260" type="text" placeholder="src, dst, domain, or port" />
+      <label class="muted" for="protoFilter">Protocol:</label>
+      <select id="protoFilter">
+        <option value="">All</option>
+        <option value="TCP">TCP</option>
+        <option value="UDP">UDP</option>
+      </select>
+    </div>
 
-</body>
-</html>
+    <div class="table-wrap tall">
+      <table id="flowsTable">
+        <thead>
+          <tr>
+            <th>Source</th>
+            <th>Destination</th>
+            <th>Src Port</th>
+            <th>Dst Port</th>
+            <th>Proto</th>
+            <th>Packets</th>
+            <th>Bytes</th>
+            <th>Duration</th>
+            <th>PPS</th>
+            <th>BPS</th>
+            <th>External IP</th>
+            <th>Domain</th>
+            <th>SYN</th>
+            <th>RST</th>
+            <th>ACK</th>
+            <th>FIN</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for f in flows %}
+          <tr data-proto="{{ f.proto }}" data-search="{{ (f.initiator|string ~ ' ' ~ f.responder|string ~ ' ' ~ f.ext_ip|string ~ ' ' ~ f.domain|string ~ ' ' ~ f.sport|string ~ ' ' ~ f.dport|string)|lower }}">
+            <td class="mono">{{ f.initiator }}</td>
+            <td class="mono">{{ f.responder }}</td>
+            <td>{{ f.sport }}</td>
+            <td>{{ f.dport }}</td>
+            <td><span class="pill">{{ f.proto }}</span></td>
+            <td>{{ f.packets }}</td>
+            <td>{{ f.bytes }}</td>
+            <td>{{ "%.3f"|format(f.duration) }}</td>
+            <td>{{ "%.2f"|format(f.pps) }}</td>
+            <td>{{ "%.1f"|format(f.bps) }}</td>
+            <td class="mono">{{ f.ext_ip or "" }}</td>
+            <td>{{ f.domain or "" }}</td>
+            <td>{{ f.tcp_syn }}</td>
+            <td>{{ f.tcp_rst }}</td>
+            <td>{{ f.tcp_ack }}</td>
+            <td>{{ f.tcp_fin }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/pcap_view.js') }}" defer></script>
+{% endblock %}

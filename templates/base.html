@@ -1,10 +1,31 @@
 <!doctype html>
 <html lang="en">
 <head>
-    <title>{% block title %}KeenEye NetMonitor{% endblock %}</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}KeenEye NetMonitor{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}" />
+  {% block extra_head %}{% endblock %}
 </head>
-
 <body>
-    <div id="content">{% block content %}{% endblock %}</div>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a href="/" class="brand" aria-label="Open dashboard">
+          <div class="brand-logo">
+            <img src="{{ url_for('static', filename='img/main-1.png') }}" alt="KeenEye logo" class="brand-logo-img" />
+          </div>
+        </a>
+        <nav class="main-nav" aria-label="Main navigation">
+          <a class="{% if request.path == '/' %}is-active{% endif %}" href="/">Dashboard</a>
+          <a class="{% if request.path == '/capture' %}is-active{% endif %}" href="/capture">Capture</a>
+          <a class="{% if request.path == '/devices' %}is-active{% endif %}" href="/devices">Devices</a>
+          <a class="{% if request.path == '/debug_alerts' %}is-active{% endif %}" href="/debug_alerts">Alerts</a>
+        </nav>
+      </div>
+    </header>
+    <main class="page">{% block content %}{% endblock %}</main>
+  </div>
+  {% block scripts %}{% endblock %}
 </body>
 </html>

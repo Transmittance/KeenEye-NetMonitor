@@ -1,12 +1,121 @@
 {% extends "base.html" %}
 
+{% block title %}KeenEye Dashboard{% endblock %}
 
 {% block content %}
-    <a>f</a>
-    {% for p in pcaps %}
-    <a href="/pcap/{{ p.name }}">{{ p.name }}</a><br>
-    {% endfor %}
-    <a href="/capture">Go to capture</a><br>
-    <a href="/devices">Go to devices</a><br>
-    <a href="/debug_alerts">Go to debug alerts</a><br>
+<section class="hero">
+  <h1>KeenEye Dashboard</h1>
+  <p>Control capture jobs, service health, network devices, and recent detection events from a single page.</p>
+</section>
+
+<div class="dashboard-columns">
+  <div class="dashboard-column">
+    <section class="panel">
+      <h2>Capture</h2>
+      <div class="row">
+        <label class="muted" for="limit">Packets:</label>
+        <input id="limit" type="number" min="1" step="1" value="500" />
+        <button id="startCapture" type="button">Start Capture</button>
+        <span id="captureState" class="pill">idle</span>
+      </div>
+      <p id="captureLine" class="mono muted status-line">Waiting for capture start.</p>
+    </section>
+
+    <section class="panel dashboard-service-panel">
+      <h2>Service Status</h2>
+      <div class="row mb-8">
+        <button id="refreshStatus" type="button">Refresh</button>
+        <span id="statusPill" class="pill">unknown</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <tbody id="statusBody">
+            <tr><td class="empty-cell" colspan="2">No data yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <div class="dashboard-column">
+    <section class="panel">
+      <h2>Devices</h2>
+      <div class="row mb-8">
+        <button id="refreshDevices" type="button">Refresh</button>
+        <button id="seeAllDevices" type="button">See all devices</button>
+        <label class="muted"><input id="autoDevices" type="checkbox" checked /> Auto refresh (5s)</label>
+        <span id="devicesInfo" class="pill">idle</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Online</th>
+              <th>IP</th>
+              <th>MAC</th>
+              <th>Name</th>
+              <th>Vendor</th>
+              <th>Capture</th>
+            </tr>
+          </thead>
+          <tbody id="devicesBody">
+            <tr><td colspan="6" class="empty-cell">No data yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel dashboard-alerts-panel">
+      <h2>Alerts Preview</h2>
+      <div class="row mb-8">
+        <button id="refreshAlerts" type="button">Refresh</button>
+        <a href="/debug_alerts">Open full debug monitor</a>
+      </div>
+      <div id="alertsBox" class="scroll-box">
+        <div class="empty-cell">No data yet.</div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div class="layout-grid">
+  <section class="panel wide">
+    <h2>PCAP Files</h2>
+    <p class="muted mt-0">Each file opens in a dedicated flow analysis page.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Source</th>
+            <th>Size (MB)</th>
+            <th>Added</th>
+            <th>Open</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if pcaps %}
+            {% for p in pcaps %}
+            <tr>
+              <td class="mono">{{ p.name }}</td>
+              <td>{{ p.source_label }}</td>
+              <td>{{ p.size_mb }}</td>
+              <td>{{ p.added }}</td>
+              <td><a href="{{ url_for('show_pcap', name=p.name) }}">Open PCAP</a></td>
+            </tr>
+            {% endfor %}
+          {% else %}
+            <tr>
+              <td colspan="5" class="empty-cell">No PCAP files yet.</td>
+            </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/main.js') }}" defer></script>
 {% endblock %}
