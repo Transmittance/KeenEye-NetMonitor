@@ -25,6 +25,9 @@ ROUTER_HOST = "192.168.1.1"
 ROUTER_USER = "root"
 ROUTER_KEY = os.path.expanduser("~/.ssh/keeneye_router")
 ROUTER_SINGLE_CAPTURE_SCRIPT = "/opt/keeneye/capture_and_send.sh"
+ROUTER_DEVICE_CAPTURE_SCRIPT = "/opt/keeneye/capture_device_and_send.sh"
+LOCAL_SINGLE_CAPTURE_SCRIPT = str(Path(__file__).resolve().parent / "scripts" / "capture_and_send.sh")
+LOCAL_DEVICE_CAPTURE_SCRIPT = str(Path(__file__).resolve().parent / "scripts" / "capture_device_and_send.sh")
 
 REMOTE_PCAP_DIR = "/opt/keeneye/captures/continious_capture"
 REMOTE_CAPTURE_SH = "/opt/keeneye/capture_rotate.sh"
@@ -39,6 +42,13 @@ MODEL_PATH = "./port_scanning/portscan_detection_cb.cbm"
 ALERT_THRESHOLD = 0.75
 ALERT_K = 1
 ALERT_WINDOW_SEC = 60
+SSH_BRUTE_PORT = 21
+SSH_BRUTE_SERVICE = "FTP"
+TELNET_BRUTE_PORT = 23
+TELNET_BRUTE_SERVICE = "Telnet"
+SSH_BRUTE_ATTEMPT_THRESHOLD = 10
+SSH_BRUTE_WINDOW_SEC = 60
+SSH_BRUTE_ALERT_COOLDOWN_SEC = 60
 
 DELETE_REMOTE_AFTER_DOWNLOAD = False
 DELETE_LOCAL_AFTER_PROCESS = False
@@ -51,6 +61,9 @@ with open("./port_scanning/fill_median.json") as f:
 
 UPLOAD_DIR = "pcaps"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+PCAP_META_PATH = os.path.join(UPLOAD_DIR, ".pcap_meta.json")
+
+pcap_meta_lock = threading.Lock()
 
 _jobs = {}
 _jobs_lock = threading.Lock()
@@ -280,7 +293,109 @@ def _job_get(job_id):
         j = _jobs.get(job_id)
         return dict(j) if j else None
 
-def _run_capture_job(job_id, limit_packets):
+def _load_pcap_meta():
+    if not os.path.exists(PCAP_META_PATH):
+        return {}
+    try:
+        with open(PCAP_META_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+def _save_pcap_meta(data):
+    tmp = f"{PCAP_META_PATH}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp, PCAP_META_PATH)
+
+def _set_pcap_meta(pcap_name, **fields):
+    with pcap_meta_lock:
+        data = _load_pcap_meta()
+        row = data.get(pcap_name, {})
+        row.update(fields)
+        data[pcap_name] = row
+        _save_pcap_meta(data)
+
+def _get_pcap_meta(pcap_name):
+    with pcap_meta_lock:
+        data = _load_pcap_meta()
+        row = data.get(pcap_name)
+        return dict(row) if isinstance(row, dict) else {}
+
+def _capture_source_label(source_type, source_name=None, source_ip=None, source_mac=None):
+    if source_type == "device":
+        parts = [x for x in [source_name, source_ip, source_mac] if x]
+        if parts:
+            return "Device: " + " / ".join(parts)
+        return "Device capture"
+    return "All devices (general capture)"
+
+def _normalize_mac(mac):
+    s = re.sub(r"[^0-9a-fA-F]", "", str(mac or "")).lower()
+    if len(s) != 12:
+        return None
+    return ":".join([s[i:i + 2] for i in range(0, 12, 2)])
+
+def _normalize_ip(ip):
+    try:
+        return str(ipaddress.ip_address(str(ip or "").strip()))
+    except Exception:
+        return None
+
+def _sanitize_device_name(name):
+    cleaned = re.sub(r"\s+", " ", str(name or "")).strip()
+    return cleaned[:120] if cleaned else None
+
+def _to_bool(v, default=False):
+    if v is None:
+        return default
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return default
+
+def _sync_router_script(local_path, remote_path):
+    if not os.path.exists(local_path):
+        raise FileNotFoundError(f"local script not found: {local_path}")
+
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(
+        ROUTER_HOST,
+        port=222,
+        username=ROUTER_USER,
+        key_filename=ROUTER_KEY,
+        timeout=10,
+        banner_timeout=10,
+        auth_timeout=10,
+    )
+
+    try:
+        sftp = ssh.open_sftp()
+        tmp_remote = f"{remote_path}.tmp"
+        try:
+            sftp.put(local_path, tmp_remote)
+            try:
+                sftp.remove(remote_path)
+            except Exception:
+                pass
+            sftp.rename(tmp_remote, remote_path)
+            sftp.chmod(remote_path, 0o755)
+        finally:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+    finally:
+        try:
+            ssh.close()
+        except Exception:
+            pass
+
+def _run_capture_job_ssh_cmd(job_id, cmd):
     _job_update(job_id, status="running", line="")
 
     ssh = paramiko.SSHClient()
@@ -297,7 +412,6 @@ def _run_capture_job(job_id, limit_packets):
             auth_timeout=10,
         )
 
-        cmd = f"KEENEYE_SERVER_URL={shlex.quote(UPLOAD_PCAP_URL)} sh {ROUTER_SINGLE_CAPTURE_SCRIPT} {job_id} {int(limit_packets)}"
         stdin, stdout, stderr = ssh.exec_command(cmd, get_pty=True)
         chan = stdout.channel
 
@@ -339,6 +453,34 @@ def _run_capture_job(job_id, limit_packets):
             ssh.close()
         except Exception:
             pass
+
+def _run_capture_job(job_id, limit_packets, script_path, extra_args=None):
+    args = [job_id, str(int(limit_packets))]
+    if extra_args:
+        args.extend([str(x) for x in extra_args if x is not None])
+    args_str = " ".join(shlex.quote(x) for x in args)
+
+    cmd = (
+        f"KEENEYE_SERVER_URL={shlex.quote(UPLOAD_PCAP_URL)} "
+        f"sh {shlex.quote(script_path)} {args_str}"
+    )
+    _run_capture_job_ssh_cmd(job_id, cmd)
+
+def _run_capture_job_device_inline(job_id, limit_packets, target_ip):
+    target_ip = _normalize_ip(target_ip)
+    if not target_ip:
+        _job_update(job_id, status="failed", error="invalid target ip")
+        return
+
+    server_with_job = f"{UPLOAD_PCAP_URL}?job_id={job_id}"
+    cmd = (
+        'PCAP_DIR="./captures"; '
+        'PCAP="$PCAP_DIR/cap_device.pcap"; '
+        'mkdir -p "$PCAP_DIR"; '
+        f'tcpdump -i br0 -w "$PCAP" -c {int(limit_packets)} -v host {target_ip}; '
+        f'curl -s -X POST -F "file=@$PCAP" {shlex.quote(server_with_job)} >/dev/null'
+    )
+    _run_capture_job_ssh_cmd(job_id, cmd)
 
 #3 ––––––––––- identify devices connected to the network ––––––––––-
 
@@ -699,6 +841,14 @@ seen_remote = set()
 sus_lock = threading.Lock()
 sus_times = {}
 
+ssh_brute_lock = threading.Lock()
+ssh_brute_windows = {}
+ssh_brute_last_alert = {}
+
+telnet_brute_lock = threading.Lock()
+telnet_brute_windows = {}
+telnet_brute_last_alert = {}
+
 model = CatBoostClassifier()
 model.load_model(MODEL_PATH)
 
@@ -794,6 +944,248 @@ def apply_alerts(df_src, df_pair, pcap_name):
                 })
                 sus_times[src] = []
 
+def _pcap_window_ts(path):
+    try:
+        return datetime.utcfromtimestamp(os.path.getmtime(path))
+    except Exception:
+        return datetime.utcnow()
+
+def _prune_ssh_brute_state(now):
+    cutoff = now - timedelta(seconds=SSH_BRUTE_WINDOW_SEC)
+    alert_gc_cutoff = now - timedelta(seconds=max(SSH_BRUTE_ALERT_COOLDOWN_SEC * 10, SSH_BRUTE_WINDOW_SEC))
+
+    for src in list(ssh_brute_windows.keys()):
+        keep = [x for x in ssh_brute_windows[src] if x["ts"] >= cutoff]
+        if keep:
+            ssh_brute_windows[src] = keep
+        else:
+            del ssh_brute_windows[src]
+
+    for src in list(ssh_brute_last_alert.keys()):
+        if ssh_brute_last_alert[src] < alert_gc_cutoff:
+            del ssh_brute_last_alert[src]
+
+def apply_ssh_bruteforce_alerts(df, pcap_name, window_ts=None):
+    now = window_ts or datetime.utcnow()
+    cutoff = now - timedelta(seconds=SSH_BRUTE_WINDOW_SEC)
+    cooldown_cutoff = now - timedelta(seconds=SSH_BRUTE_ALERT_COOLDOWN_SEC)
+
+    with ssh_brute_lock:
+        _prune_ssh_brute_state(now)
+
+    if df is None or df.empty:
+        return
+
+    df_tcp = df[df["proto"] == "TCP"].copy()
+    if df_tcp.empty:
+        return
+
+    df_tcp["responder_port"] = np.where(
+        df_tcp["initiator_is_key_src"].fillna(True).astype(bool),
+        df_tcp["dport"],
+        df_tcp["sport"],
+    )
+
+    df_ssh = df_tcp[df_tcp["responder_port"] == SSH_BRUTE_PORT].copy()
+    if df_ssh.empty:
+        return
+
+    by_src = df_ssh.groupby("initiator", as_index=False).agg(
+        attempts=("proto", "size"),
+        syn_packets=("tcp_syn", "sum"),
+        rst_packets=("tcp_rst", "sum"),
+        unique_targets=("responder", pd.Series.nunique),
+    )
+
+    by_pair = df_ssh.groupby(["initiator", "responder"], as_index=False).agg(
+        flows_total=("proto", "size"),
+        syn_count=("tcp_syn", "sum"),
+        rst_count=("tcp_rst", "sum"),
+    )
+
+    triggered = []
+    with ssh_brute_lock:
+        _prune_ssh_brute_state(now)
+
+        for r in by_src.itertuples(index=False):
+            src = r.initiator
+            attempts = int(r.attempts)
+            hist = ssh_brute_windows.get(src, [])
+            hist.append({"ts": now, "attempts": attempts, "pcap": pcap_name})
+            hist = [x for x in hist if x["ts"] >= cutoff]
+            ssh_brute_windows[src] = hist
+
+            total_attempts = sum(int(x["attempts"]) for x in hist)
+            active_windows = len(hist)
+
+            if total_attempts <= SSH_BRUTE_ATTEMPT_THRESHOLD:
+                continue
+
+            last_alert = ssh_brute_last_alert.get(src)
+            if last_alert and last_alert >= cooldown_cutoff:
+                continue
+
+            ssh_brute_last_alert[src] = now
+            triggered.append({
+                "src": src,
+                "total_attempts": total_attempts,
+                "active_windows": active_windows,
+                "unique_targets": int(r.unique_targets),
+                "syn_packets": int(r.syn_packets),
+                "rst_packets": int(r.rst_packets),
+            })
+
+    for hit in triggered:
+        top = []
+        sub = by_pair[by_pair["initiator"] == hit["src"]].sort_values("flows_total", ascending=False).head(5)
+        for rr in sub.itertuples(index=False):
+            top.append({
+                "dst": rr.responder,
+                "flows_total": int(rr.flows_total),
+                "unique_dst_ports": 1,
+                "syn_count": int(rr.syn_count),
+                "rst_count": int(rr.rst_count),
+            })
+
+        push({
+            "type": "alert",
+            "category": f"{SSH_BRUTE_SERVICE.lower()}_bruteforce",
+            "pcap": pcap_name,
+            "src": hit["src"],
+            "proba": f"{SSH_BRUTE_SERVICE.lower()}-brute",
+            "port": SSH_BRUTE_PORT,
+            "attempts_total": hit["total_attempts"],
+            "windows_active": hit["active_windows"],
+            "unique_targets": hit["unique_targets"],
+            "syn_count": hit["syn_packets"],
+            "rst_count": hit["rst_packets"],
+            "severity": "warning",
+            "message": (
+                f"Warning: {SSH_BRUTE_SERVICE} brute-force suspected from {hit['src']}: "
+                f"{hit['total_attempts']} attempts to port {SSH_BRUTE_PORT} in "
+                f"{SSH_BRUTE_WINDOW_SEC}s"
+            ),
+            "top_targets": top,
+        })
+
+def _prune_telnet_brute_state(now):
+    cutoff = now - timedelta(seconds=SSH_BRUTE_WINDOW_SEC)
+    alert_gc_cutoff = now - timedelta(seconds=max(SSH_BRUTE_ALERT_COOLDOWN_SEC * 10, SSH_BRUTE_WINDOW_SEC))
+
+    for src in list(telnet_brute_windows.keys()):
+        keep = [x for x in telnet_brute_windows[src] if x["ts"] >= cutoff]
+        if keep:
+            telnet_brute_windows[src] = keep
+        else:
+            del telnet_brute_windows[src]
+
+    for src in list(telnet_brute_last_alert.keys()):
+        if telnet_brute_last_alert[src] < alert_gc_cutoff:
+            del telnet_brute_last_alert[src]
+
+def apply_telnet_bruteforce_alerts(df, pcap_name, window_ts=None):
+    now = window_ts or datetime.utcnow()
+    cutoff = now - timedelta(seconds=SSH_BRUTE_WINDOW_SEC)
+    cooldown_cutoff = now - timedelta(seconds=SSH_BRUTE_ALERT_COOLDOWN_SEC)
+
+    with telnet_brute_lock:
+        _prune_telnet_brute_state(now)
+
+    if df is None or df.empty:
+        return
+
+    df_tcp = df[df["proto"] == "TCP"].copy()
+    if df_tcp.empty:
+        return
+
+    df_tcp["responder_port"] = np.where(
+        df_tcp["initiator_is_key_src"].fillna(True).astype(bool),
+        df_tcp["dport"],
+        df_tcp["sport"],
+    )
+
+    df_telnet = df_tcp[df_tcp["responder_port"] == TELNET_BRUTE_PORT].copy()
+    if df_telnet.empty:
+        return
+
+    by_src = df_telnet.groupby("initiator", as_index=False).agg(
+        attempts=("proto", "size"),
+        syn_packets=("tcp_syn", "sum"),
+        rst_packets=("tcp_rst", "sum"),
+        unique_targets=("responder", pd.Series.nunique),
+    )
+
+    by_pair = df_telnet.groupby(["initiator", "responder"], as_index=False).agg(
+        flows_total=("proto", "size"),
+        syn_count=("tcp_syn", "sum"),
+        rst_count=("tcp_rst", "sum"),
+    )
+
+    triggered = []
+    with telnet_brute_lock:
+        _prune_telnet_brute_state(now)
+
+        for r in by_src.itertuples(index=False):
+            src = r.initiator
+            attempts = int(r.attempts)
+            hist = telnet_brute_windows.get(src, [])
+            hist.append({"ts": now, "attempts": attempts, "pcap": pcap_name})
+            hist = [x for x in hist if x["ts"] >= cutoff]
+            telnet_brute_windows[src] = hist
+
+            total_attempts = sum(int(x["attempts"]) for x in hist)
+            active_windows = len(hist)
+
+            if total_attempts <= SSH_BRUTE_ATTEMPT_THRESHOLD:
+                continue
+
+            last_alert = telnet_brute_last_alert.get(src)
+            if last_alert and last_alert >= cooldown_cutoff:
+                continue
+
+            telnet_brute_last_alert[src] = now
+            triggered.append({
+                "src": src,
+                "total_attempts": total_attempts,
+                "active_windows": active_windows,
+                "unique_targets": int(r.unique_targets),
+                "syn_packets": int(r.syn_packets),
+                "rst_packets": int(r.rst_packets),
+            })
+
+    for hit in triggered:
+        top = []
+        sub = by_pair[by_pair["initiator"] == hit["src"]].sort_values("flows_total", ascending=False).head(5)
+        for rr in sub.itertuples(index=False):
+            top.append({
+                "dst": rr.responder,
+                "flows_total": int(rr.flows_total),
+                "unique_dst_ports": 1,
+                "syn_count": int(rr.syn_count),
+                "rst_count": int(rr.rst_count),
+            })
+
+        push({
+            "type": "alert",
+            "category": f"{TELNET_BRUTE_SERVICE.lower()}_bruteforce",
+            "pcap": pcap_name,
+            "src": hit["src"],
+            "proba": f"{TELNET_BRUTE_SERVICE.lower()}-brute",
+            "port": TELNET_BRUTE_PORT,
+            "attempts_total": hit["total_attempts"],
+            "windows_active": hit["active_windows"],
+            "unique_targets": hit["unique_targets"],
+            "syn_count": hit["syn_packets"],
+            "rst_count": hit["rst_packets"],
+            "severity": "warning",
+            "message": (
+                f"Warning: {TELNET_BRUTE_SERVICE} brute-force suspected from {hit['src']}: "
+                f"{hit['total_attempts']} attempts to port {TELNET_BRUTE_PORT} in "
+                f"{SSH_BRUTE_WINDOW_SEC}s"
+            ),
+            "top_targets": top,
+        })
+
 def rsync_pull():
     ssh_cmd = f"ssh -p 222 -i {ROUTER_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
     remote = f"{ROUTER_USER}@{ROUTER_HOST}:{REMOTE_PCAP_DIR}/"
@@ -824,6 +1216,9 @@ def process_pcap_for_alerts(path, pcap_name):
     ip2domain = build_dns_cache(path)
     flows = pcap_to_flows(path, ip2domain=ip2domain)
     df = pd.DataFrame(flows)
+    window_ts = _pcap_window_ts(path)
+    apply_ssh_bruteforce_alerts(df, pcap_name, window_ts=window_ts)
+    apply_telnet_bruteforce_alerts(df, pcap_name, window_ts=window_ts)
     if df.empty:
         return
 
@@ -928,6 +1323,10 @@ def api_status():
         "threshold": ALERT_THRESHOLD,
         "K": ALERT_K,
         "window_sec": ALERT_WINDOW_SEC,
+        "brute_service": SSH_BRUTE_SERVICE,
+        "ssh_brute_port": SSH_BRUTE_PORT,
+        "ssh_brute_attempt_threshold": SSH_BRUTE_ATTEMPT_THRESHOLD,
+        "ssh_brute_window_sec": SSH_BRUTE_WINDOW_SEC,
         "model": MODEL_PATH,
         "local_spool": str(LOCAL_SPOOL_DIR),
     })
@@ -974,15 +1373,37 @@ def shutdown_handler(signum, frame):
 signal.signal(signal.SIGINT, shutdown_handler)
 signal.signal(signal.SIGTERM, shutdown_handler)
 
-# start_worker()
+start_worker()
 
 #5 ––––––––––- flask routes ––––––––––-
 
-@app.post("/capture/start")
-def capture_start():
-    limit = int(request.json.get("limit", 5000)) if request.is_json else 5000
-    job_id = uuid.uuid4().hex
+def _capture_limit_from_request():
+    try:
+        limit = int(request.json.get("limit", 5000)) if request.is_json else 5000
+    except Exception:
+        limit = 5000
+    return max(1, min(limit, 2_000_000))
 
+def _capture_analyze_from_request(default=False):
+    if not request.is_json:
+        return default
+    return _to_bool(request.json.get("analyze"), default=default)
+
+def _create_capture_job(
+    limit,
+    source_type,
+    source_name=None,
+    source_ip=None,
+    source_mac=None,
+    analyze_uploaded_pcap=False,
+):
+    job_id = uuid.uuid4().hex
+    source_label = _capture_source_label(
+        source_type=source_type,
+        source_name=source_name,
+        source_ip=source_ip,
+        source_mac=source_mac,
+    )
     with _jobs_lock:
         _jobs[job_id] = {
             "id": job_id,
@@ -990,11 +1411,94 @@ def capture_start():
             "line": "Queued",
             "error": None,
             "pcap_name": None,
+            "limit": int(limit),
+            "capture_source_type": source_type,
+            "capture_source_label": source_label,
+            "capture_source_name": source_name,
+            "capture_source_ip": source_ip,
+            "capture_source_mac": source_mac,
+            "analyze_uploaded_pcap": bool(analyze_uploaded_pcap),
             "created_at": time.time(),
             "updated_at": time.time(),
         }
+    return job_id
 
-    t = threading.Thread(target=_run_capture_job, args=(job_id, limit), daemon=True)
+@app.post("/capture/start")
+def capture_start():
+    try:
+        _sync_router_script(LOCAL_SINGLE_CAPTURE_SCRIPT, ROUTER_SINGLE_CAPTURE_SCRIPT)
+    except Exception as e:
+        push({"type": "system", "message": f"capture script sync warning: {e}"})
+
+    limit = _capture_limit_from_request()
+    analyze_uploaded_pcap = _capture_analyze_from_request(default=False)
+    job_id = _create_capture_job(
+        limit,
+        source_type="general",
+        analyze_uploaded_pcap=analyze_uploaded_pcap,
+    )
+
+    t = threading.Thread(
+        target=_run_capture_job,
+        args=(job_id, limit, ROUTER_SINGLE_CAPTURE_SCRIPT),
+        daemon=True,
+    )
+    t.start()
+
+    return jsonify({"job_id": job_id})
+
+@app.post("/capture/start_device")
+def capture_start_device():
+    if not request.is_json:
+        return jsonify({"error": "expected JSON body"}), 400
+
+    limit = _capture_limit_from_request()
+    analyze_uploaded_pcap = _capture_analyze_from_request(default=False)
+    ip = _normalize_ip(request.json.get("ip"))
+    mac = _normalize_mac(request.json.get("mac"))
+    name = _sanitize_device_name(request.json.get("name")) or _sanitize_device_name(request.json.get("hostname"))
+
+    if not ip:
+        return jsonify({"error": "valid device ip is required"}), 400
+    if not mac:
+        return jsonify({"error": "valid device mac is required"}), 400
+
+    devices = _get_devices_snapshot()
+    live = next((d for d in devices if _normalize_mac(d.get("mac")) == mac), None)
+    if not live:
+        return jsonify({"error": "device not found"}), 404
+    if not live.get("online"):
+        return jsonify({"error": "device is offline"}), 409
+
+    live_ip = _normalize_ip(live.get("ip"))
+    if not live_ip:
+        return jsonify({"error": "device has no online ip"}), 409
+    if live_ip != ip:
+        return jsonify({"error": "device ip mismatch"}), 409
+
+    live_name = _sanitize_device_name(live.get("name")) or _sanitize_device_name(live.get("hostname"))
+    if live_name:
+        name = live_name
+
+    job_id = _create_capture_job(
+        limit,
+        source_type="device",
+        source_name=name,
+        source_ip=ip,
+        source_mac=mac,
+        analyze_uploaded_pcap=analyze_uploaded_pcap,
+    )
+
+    runner = _run_capture_job
+    runner_args = (job_id, limit, ROUTER_DEVICE_CAPTURE_SCRIPT, [ip])
+    try:
+        _sync_router_script(LOCAL_DEVICE_CAPTURE_SCRIPT, ROUTER_DEVICE_CAPTURE_SCRIPT)
+    except Exception as e:
+        push({"type": "system", "message": f"device capture script sync warning, using inline fallback: {e}"})
+        runner = _run_capture_job_device_inline
+        runner_args = (job_id, limit, ip)
+
+    t = threading.Thread(target=runner, args=runner_args, daemon=True)
     t.start()
 
     return jsonify({"job_id": job_id})
@@ -1021,6 +1525,8 @@ def capture_stream(job_id):
                 "line": j.get("line"),
                 "error": j.get("error"),
                 "pcap_name": j.get("pcap_name"),
+                "capture_source_type": j.get("capture_source_type"),
+                "capture_source_label": j.get("capture_source_label"),
             }, ensure_ascii=False)
 
             if payload != last_sent:
@@ -1050,11 +1556,15 @@ def index():
     for name in sorted(os.listdir(UPLOAD_DIR), reverse=True):
         if name.endswith(".pcap"):
             path = os.path.join(UPLOAD_DIR, name)
+            meta = _get_pcap_meta(name)
+            added_ts = meta.get("added_ts")
+            if not isinstance(added_ts, (int, float)):
+                added_ts = os.path.getmtime(path)
             pcaps.append({
                 "name": name,
+                "source_label": meta.get("source_label") or _capture_source_label("general"),
                 "size_mb": round(os.path.getsize(path) / (1024*1024), 2),
-                "mtime": time.strftime("%Y-%m-%d %H:%M:%S",
-                                       time.localtime(os.path.getmtime(path)))
+                "added": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(added_ts)),
             })
 
     return render_template("main.html", pcaps=pcaps)
@@ -1064,14 +1574,47 @@ def upload_pcap():
     f = request.files["file"]
 
     job_id = request.args.get("job_id")
+    source_type = "general"
+    source_label = _capture_source_label("general")
+    source_ip = None
+    source_mac = None
+    should_analyze = _to_bool(request.args.get("analyze"), default=False)
+
+    if job_id:
+        j = _job_get(job_id)
+        if j:
+            source_type = j.get("capture_source_type") or "general"
+            source_label = j.get("capture_source_label") or _capture_source_label("general")
+            source_ip = j.get("capture_source_ip")
+            source_mac = j.get("capture_source_mac")
+            if request.args.get("analyze") is None:
+                should_analyze = bool(j.get("analyze_uploaded_pcap"))
 
     name = f"cap_{int(time.time())}.pcap"
     path = os.path.join(UPLOAD_DIR, name)
     f.save(path)
-    process_uploaded_pcap_async(path, name)
+    _set_pcap_meta(
+        name,
+        source_type=source_type,
+        source_label=source_label,
+        source_ip=source_ip,
+        source_mac=source_mac,
+        added_ts=time.time(),
+    )
+    if should_analyze:
+        process_uploaded_pcap_async(path, name)
+    else:
+        push({"type": "system", "message": f"pcap uploaded without auto-analysis: {name}"})
 
     if job_id:
-        _job_update(job_id, status="done", line="Done", pcap_name=name)
+        _job_update(
+            job_id,
+            status="done",
+            line="Done",
+            pcap_name=name,
+            capture_source_type=source_type,
+            capture_source_label=source_label,
+        )
 
     return "ok"
 
